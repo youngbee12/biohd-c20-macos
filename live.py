@@ -20,6 +20,8 @@ latest_jpeg = b""
 latest_lock = threading.Lock()
 frame_event = threading.Event()
 white_balance_event = threading.Event()
+ffc_event = threading.Event()
+dfc_event = threading.Event()
 first_frame = threading.Event()
 stop_event = threading.Event()
 camera_error = None
@@ -33,6 +35,10 @@ def on_camera_event(event, _):
         frame_event.set()
     elif event in (toupcam.TOUPCAM_EVENT_TEMPTINT, toupcam.TOUPCAM_EVENT_WBGAIN):
         white_balance_event.set()
+    elif event == toupcam.TOUPCAM_EVENT_FFC:
+        ffc_event.set()
+    elif event == toupcam.TOUPCAM_EVENT_DFC:
+        dfc_event.set()
     elif event in (
         toupcam.TOUPCAM_EVENT_ERROR,
         toupcam.TOUPCAM_EVENT_DISCONNECTED,
@@ -69,10 +75,32 @@ def capture_frames(width, height):
         first_frame.set()
 
 
-def page():
-    exposure = camera.get_ExpoTime() / 1000
-    gain = camera.get_ExpoAGain()
+def camera_state():
     temperature, tint = camera.get_TempTint()
+    return {
+        "auto": camera.get_AutoExpoEnable(),
+        "exposure": camera.get_ExpoTime() / 1000,
+        "gain": camera.get_ExpoAGain(),
+        "exposure_target": camera.get_AutoExpoTarget(),
+        "temperature": temperature,
+        "tint": tint,
+        "hue": camera.get_Hue(),
+        "saturation": camera.get_Saturation(),
+        "brightness": camera.get_Brightness(),
+        "contrast": camera.get_Contrast(),
+        "gamma": camera.get_Gamma(),
+        "ffc": camera.get_Option(toupcam.TOUPCAM_OPTION_FFC) & 0xff,
+        "dfc": camera.get_Option(toupcam.TOUPCAM_OPTION_DFC) & 0xff,
+    }
+
+
+def bounded(query, name, minimum, maximum):
+    return max(minimum, min(maximum, int(float(query[name][0]))))
+
+
+def page():
+    state = camera_state()
+    auto_checked = "checked" if state["auto"] else ""
     emin, emax, _ = limits["exposure"]
     gmin, gmax, _ = limits["gain"]
     return f"""<!doctype html>
@@ -80,26 +108,42 @@ def page():
 <title>BioHD-C20 实时预览</title>
 <style>
 body{{margin:0;background:#111;color:#eee;font:15px -apple-system,BlinkMacSystemFont,sans-serif}}
-header{{display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:10px 18px;background:#1c1c1e;position:sticky;top:0}}
+header,.advanced{{display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:10px 18px;background:#1c1c1e}}
+header{{position:sticky;top:0;z-index:2}} details{{background:#252527}} summary{{cursor:pointer;padding:9px 18px}}
 h1{{font-size:17px;margin:0 auto 0 0}} label{{white-space:nowrap}} input[type=number]{{width:90px}}
 button,a{{background:#3a7afe;color:white;border:0;border-radius:7px;padding:7px 11px;text-decoration:none}}
-main{{height:calc(100vh - 58px);display:grid;place-items:center}} img{{max-width:100%;max-height:100%;object-fit:contain}}
+button.secondary{{background:#555}} main{{height:calc(100vh - 58px);display:grid;place-items:center}} img{{max-width:100%;max-height:100%;object-fit:contain}}
 </style>
 <header><h1>BioHD-C20 · 1824×1216</h1>
-<label><input id="auto" type="checkbox" checked> 自动曝光</label>
-<label>曝光 ms <input id="exposure" type="number" min="{emin/1000}" max="{emax/1000}" step="0.1" value="{exposure:.1f}"></label>
-<label>增益 % <input id="gain" type="number" min="{gmin}" max="{gmax}" value="{gain}"></label>
-<label>色温 K <input id="temperature" type="number" min="2000" max="15000" value="{temperature}"></label>
-<label>色调 <input id="tint" type="number" min="200" max="2500" value="{tint}"></label>
+<label><input id="auto" type="checkbox" {auto_checked}> 自动曝光</label>
+<label>曝光 ms <input id="exposure" type="number" min="{emin/1000}" max="{emax/1000}" step="0.1" value="{state['exposure']:.1f}"></label>
+<label>增益 % <input id="gain" type="number" min="{gmin}" max="{gmax}" value="{state['gain']}"></label>
+<label>色温 K <input id="temperature" type="number" min="2000" max="15000" value="{state['temperature']}"></label>
+<label>Tint <input id="tint" type="number" min="200" max="2500" value="{state['tint']}"></label>
 <button onclick="apply()">应用</button><button onclick="awb()">一键白平衡</button>
 <button onclick="resetWB()">白平衡默认值</button><a href="/snapshot.jpg">保存当前帧</a></header>
+<details><summary>FLUOCA 风格高级色彩控制</summary><div class="advanced">
+<label>曝光目标 <input id="exposure_target" type="number" min="16" max="220" value="{state['exposure_target']}"></label>
+<label>色相 <input id="hue" type="number" min="-180" max="180" value="{state['hue']}"></label>
+<label>饱和度 <input id="saturation" type="number" min="0" max="255" value="{state['saturation']}"></label>
+<label>亮度 <input id="brightness" type="number" min="-255" max="255" value="{state['brightness']}"></label>
+<label>对比度 <input id="contrast" type="number" min="-255" max="255" value="{state['contrast']}"></label>
+<label>Gamma <input id="gamma" type="number" min="20" max="180" value="{state['gamma']}"></label>
+<button onclick="applyColor()">应用色彩</button><button class="secondary" onclick="resetColor()">恢复中性默认值</button>
+<button class="secondary" onclick="flatField()">采集并启用平场校正</button>
+<button class="secondary" onclick="darkField()">采集并启用暗场校正</button>
+</div></details>
 <main><img id="preview" alt="BioHD-C20 实时画面"></main>
 <script>
 const img=document.querySelector('#preview');
 setInterval(()=>img.src='/frame.jpg?t='+Date.now(),120);
-async function control(query){{const data=await (await fetch('/control?'+query)).json();temperature.value=data.temperature;tint.value=data.tint}}
+async function control(query){{const data=await (await fetch('/control?'+query)).json();for(const [key,value] of Object.entries(data)){{const el=document.getElementById(key);if(!el||key==='ok')continue;if(key==='auto')el.checked=Boolean(value);else el.value=value}}}}
 function apply(){{control(`auto=${{auto.checked?1:0}}&exposure=${{exposure.value}}&gain=${{gain.value}}&temperature=${{temperature.value}}&tint=${{tint.value}}`)}}
 function awb(){{control('awb=1')}} function resetWB(){{control('resetwb=1')}}
+function applyColor(){{control(`color=1&exposure_target=${{exposure_target.value}}&hue=${{hue.value}}&saturation=${{saturation.value}}&brightness=${{brightness.value}}&contrast=${{contrast.value}}&gamma=${{gamma.value}}`)}}
+function resetColor(){{control('resetcolor=1')}}
+function flatField(){{if(confirm('移开样品，保持当前照明和焦点，再采集平场。是否继续？'))control('ffc=1')}}
+function darkField(){{if(confirm('完全盖住镜头，并保持当前曝光和增益，再采集暗场。是否继续？'))control('dfc=1')}}
 </script></html>""".encode()
 
 
@@ -124,10 +168,42 @@ class Handler(BaseHTTPRequestHandler):
             elif "resetwb" in query:
                 camera.put_TempTint(toupcam.TOUPCAM_TEMP_DEF, toupcam.TOUPCAM_TINT_DEF)
             elif "temperature" in query:
-                camera.put_TempTint(int(query["temperature"][0]), int(query["tint"][0]))
+                camera.put_TempTint(
+                    bounded(query, "temperature", toupcam.TOUPCAM_TEMP_MIN, toupcam.TOUPCAM_TEMP_MAX),
+                    bounded(query, "tint", toupcam.TOUPCAM_TINT_MIN, toupcam.TOUPCAM_TINT_MAX),
+                )
+            if "resetcolor" in query:
+                camera.put_AutoExpoTarget(toupcam.TOUPCAM_AETARGET_DEF)
+                camera.put_Hue(toupcam.TOUPCAM_HUE_DEF)
+                camera.put_Saturation(toupcam.TOUPCAM_SATURATION_DEF)
+                camera.put_Brightness(toupcam.TOUPCAM_BRIGHTNESS_DEF)
+                camera.put_Contrast(toupcam.TOUPCAM_CONTRAST_DEF)
+                camera.put_Gamma(toupcam.TOUPCAM_GAMMA_DEF)
+            elif "color" in query:
+                camera.put_AutoExpoTarget(bounded(query, "exposure_target", toupcam.TOUPCAM_AETARGET_MIN, toupcam.TOUPCAM_AETARGET_MAX))
+                camera.put_Hue(bounded(query, "hue", toupcam.TOUPCAM_HUE_MIN, toupcam.TOUPCAM_HUE_MAX))
+                camera.put_Saturation(bounded(query, "saturation", toupcam.TOUPCAM_SATURATION_MIN, toupcam.TOUPCAM_SATURATION_MAX))
+                camera.put_Brightness(bounded(query, "brightness", toupcam.TOUPCAM_BRIGHTNESS_MIN, toupcam.TOUPCAM_BRIGHTNESS_MAX))
+                camera.put_Contrast(bounded(query, "contrast", toupcam.TOUPCAM_CONTRAST_MIN, toupcam.TOUPCAM_CONTRAST_MAX))
+                camera.put_Gamma(bounded(query, "gamma", toupcam.TOUPCAM_GAMMA_MIN, toupcam.TOUPCAM_GAMMA_MAX))
+            if "ffc" in query:
+                ffc_event.clear()
+                camera.put_Option(toupcam.TOUPCAM_OPTION_FFC, 0xff000010)
+                camera.FfcOnce()
+                ffc_event.wait(5)
+                camera.put_Option(toupcam.TOUPCAM_OPTION_FFC, 1)
+            if "dfc" in query:
+                dfc_event.clear()
+                camera.put_Option(toupcam.TOUPCAM_OPTION_DFC, 0xff000010)
+                camera.DfcOnce()
+                dfc_event.wait(5)
+                camera.put_Option(toupcam.TOUPCAM_OPTION_DFC, 1)
             if "auto" in query:
-                auto = int(query["auto"][0])
-                camera.put_AutoExpoEnable(auto)
+                auto = bounded(query, "auto", 0, 1)
+                try:
+                    camera.put_AutoExpoEnable(auto)
+                except toupcam.HRESULTException:
+                    pass
             if "auto" in query and not auto:
                 emin, emax, _ = limits["exposure"]
                 gmin, gmax, _ = limits["gain"]
@@ -135,8 +211,7 @@ class Handler(BaseHTTPRequestHandler):
                 gain = int(query["gain"][0])
                 camera.put_ExpoTime(max(emin, min(emax, exposure)))
                 camera.put_ExpoAGain(max(gmin, min(gmax, gain)))
-            temperature, tint = camera.get_TempTint()
-            self.reply(json.dumps({"ok": True, "temperature": temperature, "tint": tint}).encode(), "application/json")
+            self.reply(json.dumps({"ok": True, **camera_state()}).encode(), "application/json")
         else:
             self.send_error(404)
 
@@ -166,7 +241,10 @@ def main():
         raise SystemExit("BioHD-C20 打开失败。")
     try:
         camera.put_eSize(2)
-        camera.put_AutoExpoEnable(1)
+        try:
+            camera.put_AutoExpoEnable(1)
+        except toupcam.HRESULTException:
+            pass
         limits = {"exposure": camera.get_ExpTimeRange(), "gain": camera.get_ExpoAGainRange()}
         width, height = camera.get_Size()
         worker = threading.Thread(target=capture_frames, args=(width, height), daemon=True)
