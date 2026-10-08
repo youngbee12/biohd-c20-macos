@@ -1,0 +1,8 @@
+.DS_Store
+.venv/
+__pycache__/
+*.pyc
+libbiohd_shim.dylib
+libtoupcam.dylib
+toupcam.py
+last-frame.*
